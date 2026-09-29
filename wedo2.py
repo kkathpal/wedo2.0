@@ -34,6 +34,7 @@ COLORS = {
 class WeDoHub:
     def __init__(self):
         self.client = None
+        self.name = self.address = None   # of the hub found by connect()
         self.ports = {}        # port number (1/2) -> device type id
         self.sensors = {}      # port number -> latest raw value(s)
         self.button_pressed = False
@@ -43,15 +44,20 @@ class WeDoHub:
 
     # ---------- connection ----------
 
-    async def connect(self, timeout=30):
+    async def connect(self, timeout=30, exclude=()):
+        """Connect to the first WeDo hub found, skipping the addresses in `exclude`
+        (hubs already connected, when driving more than one)."""
         print("Searching for WeDo 2.0 hub... press the green button on the hub.")
+        skip = {a.upper() for a in exclude}
         device = await BleakScanner.find_device_by_filter(
-            lambda d, ad: DEVICE_SERVICE in [u.lower() for u in ad.service_uuids]
-            or (d.name or "").startswith("LPF2 Smart Hub"),
+            lambda d, ad: d.address.upper() not in skip and (
+                DEVICE_SERVICE in [u.lower() for u in ad.service_uuids]
+                or (d.name or "").startswith("LPF2 Smart Hub")),
             timeout=timeout,
         )
         if device is None:
             raise RuntimeError("Hub not found. Press the green button and try again.")
+        self.name, self.address = device.name or "WeDo hub", device.address
 
         self.client = BleakClient(
             device, disconnected_callback=lambda _: self.on_disconnect and self.on_disconnect()
