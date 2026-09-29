@@ -148,6 +148,29 @@ def load_calibration(slot="car"):
     return DEFAULT_CAL, False
 
 
+def predict_choice(cal):
+    """What each calibration arrow's raw test pattern does under calibration `cal`,
+    as {arrow: motion}; used to pre-fill the answers."""
+    forward, right = cal
+    flip = lambda signs: tuple(-x for x in signs)
+    predicted = {forward: "fwd", flip(forward): "back", right: "right", flip(right): "left"}
+    return {key: predicted[pattern] for key, pattern in TEST_PATTERNS.items()}
+
+
+def cal_from_choice(choice):
+    """Turn {arrow: motion the car did} into (calibration, None), or (None, reason) when
+    the answers don't add up. Shared with rc_car_phone.py."""
+    if not isinstance(choice, dict) or set(choice) != set(TEST_PATTERNS):
+        return None, "Pick a motion for every arrow."
+    by_motion = {m: k for k, m in choice.items() if m in TEST_PATTERNS}
+    if len(by_motion) < len(TEST_PATTERNS):
+        return None, "Pick a motion for every arrow."
+    if {choice["fwd"], choice["back"]} not in ({"fwd", "back"}, {"left", "right"}):
+        return None, ("⚠ ▲ and ▼ are exact opposites, so they must be Forward + Backward\n"
+                      "or Left + Right. Test them again (and check both motors are plugged in).")
+    return (TEST_PATTERNS[by_motion["fwd"]], TEST_PATTERNS[by_motion["right"]]), None
+
+
 def save_calibration(cal):
     """Save single mode's calibration."""
     forward, right = cal
@@ -669,10 +692,7 @@ class CalibrationWindow:
         self.test_stop_id = None   # after() id that ends a short Test click
 
         # Start from what the current calibration says each test pattern does
-        forward, right = slot.cal
-        flip = lambda signs: tuple(-x for x in signs)
-        predicted = {forward: "fwd", flip(forward): "back", right: "right", flip(right): "left"}
-        self.choice = {key: predicted[pattern] for key, pattern in TEST_PATTERNS.items()}
+        self.choice = predict_choice(slot.cal)
 
         w = self.win = tk.Toplevel(app.root)
         w.title("Calibrate steering")
@@ -800,14 +820,7 @@ class CalibrationWindow:
 
     def _result(self):
         """Return (calibration, None) if the choices make sense, else (None, reason)."""
-        by_motion = {m: k for k, m in self.choice.items() if m}
-        if len(by_motion) < 4:
-            return None, "Pick a motion for every arrow."
-        pair = {self.choice["fwd"], self.choice["back"]}
-        if pair not in ({"fwd", "back"}, {"left", "right"}):
-            return None, ("⚠ ▲ and ▼ are exact opposites, so they must be Forward + Backward\n"
-                          "or Left + Right. Test them again (and check both motors are plugged in).")
-        return (TEST_PATTERNS[by_motion["fwd"]], TEST_PATTERNS[by_motion["right"]]), None
+        return cal_from_choice(self.choice)
 
     def _refresh(self):
         for (key, motion), chip in self.chips.items():

@@ -84,6 +84,36 @@
   .hub span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .hub.ok span { color: var(--fg); }
   .pad.off { opacity: .35; }
+  .calopen { width: 100%; margin-top: 10px; padding: 9px; border-radius: 10px; background: var(--hover);
+    font-weight: 700; font-size: 13px; }
+
+  /* Calibrate screen */
+  .sheet { position: fixed; inset: 0; z-index: 5; background: var(--bg); overflow-y: auto; display: none;
+    padding: env(safe-area-inset-top) 16px calc(env(safe-area-inset-bottom) + 16px); }
+  .sheet.show { display: block; }
+  .sheet-head { display: flex; align-items: center; gap: 10px; padding: 12px 0 6px; }
+  .sheet-head h2 { flex: 1; margin: 0; font-size: 17px; }
+  .sheet .hint { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
+  .sheet .warn { margin: 0 0 10px; }
+  .calrow { background: var(--panel); border-radius: 12px; padding: 10px; margin-bottom: 10px; }
+  .calrow .top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .calrow .top b { flex: 1; font-size: 14px; }
+  .calrow .sym { font-size: 20px; width: 28px; text-align: center; }
+  .chips { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+  .chips.two { grid-template-columns: 1fr 1fr; margin-top: 6px; }
+  .chip, .test, .check { padding: 9px 2px; border-radius: 8px; background: var(--hover); font-size: 12px;
+    font-weight: 600; touch-action: none; }
+  .chip.on { background: var(--accent); color: #111; }
+  .test { padding: 8px 16px; background: var(--bg); border: 1px solid var(--line); }
+  .test.on, .check.on { background: var(--accent); color: #111; }
+  .checks { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .check { font-size: 18px; padding: 12px 0; }
+  .calmsg { font-size: 13px; min-height: 18px; margin: 10px 0; white-space: pre-line; }
+  .calmsg.ok { color: var(--good); } .calmsg.bad { color: var(--bad); }
+  .save { width: 100%; padding: 13px; border-radius: 12px; background: var(--accent); color: #111;
+    font-weight: 800; font-size: 15px; }
+  .save:disabled { background: var(--panel); color: var(--muted); }
+  .small { padding: 7px 12px; border-radius: 8px; background: var(--panel); font-size: 13px; }
   footer { color: var(--muted); font-size: 11px; text-align: center; padding: 12px 0 14px; }
 
   .overlay { position: fixed; inset: 0; background: #1b1c21ee; display: none; place-items: center;
@@ -106,6 +136,7 @@
     <button data-mode="dual">Dual · 4×4 truck</button>
   </div>
   <div class="hubs" id="hubs"></div>
+  <button class="calopen" id="calOpen">Calibrate…</button>
 </div>
 
 <div class="layout">
@@ -142,6 +173,15 @@
 
 <footer>Hold arrows to drive · two fingers to curve</footer>
 
+<div class="sheet" id="calSheet">
+  <div class="sheet-head"><h2 id="calTitle">Calibrate</h2><button class="small" id="calClose">Cancel</button></div>
+  <p class="hint" id="calHint"></p>
+  <p class="warn" id="calHubs"></p>
+  <div id="calBody"></div>
+  <p class="calmsg" id="calMsg"></p>
+  <button class="save" id="calSave">Save</button>
+</div>
+
 <div class="overlay" id="overlay"><div><h2 id="ovTitle">Connecting…</h2><p id="ovText">Looking for the controller on your PC.</p></div></div>
 
 <script>
@@ -165,7 +205,7 @@ document.querySelectorAll(".key").forEach(k => {
   const up = e => { pointers.delete(e.pointerId); recompute(); };
   ["pointerup", "pointercancel", "lostpointercapture"].forEach(t => k.addEventListener(t, up));
 });
-function releaseAll() { pointers.clear(); keys.clear(); recompute(); post("/stop", {}); }
+function releaseAll() { calStop(); pointers.clear(); keys.clear(); recompute(); post("/stop", {}); }
 $("stop").addEventListener("pointerdown", e => { e.preventDefault(); releaseAll(); });
 $("horn").addEventListener("pointerdown", e => { e.preventDefault(); post("/horn", {}); });
 document.addEventListener("contextmenu", e => e.preventDefault());
@@ -174,6 +214,7 @@ window.addEventListener("blur", releaseAll);
 
 const KEYMAP = { ArrowUp: "fwd", w: "fwd", ArrowDown: "back", s: "back", ArrowLeft: "left", a: "left", ArrowRight: "right", d: "right" };
 addEventListener("keydown", e => {
+  if (cal) return;   // the Calibrate screen is open: keys don't drive
   if (KEYMAP[e.key]) { e.preventDefault(); keys.add(KEYMAP[e.key]); recompute(); }
   else if (e.key === " ") releaseAll();
   else if (e.key === "h" && !e.repeat) post("/horn", {});
@@ -216,7 +257,8 @@ async function poll() {
   } catch (e) { fail(); }
 }
 setInterval(() => {
-  if (held.size) send(false);                       // heartbeat: keeps the car moving while held
+  if (calTest) sendCal();                           // heartbeat for a calibration test
+  else if (held.size) send(false);                  // heartbeat: keeps the car moving while held
   else if (performance.now() - lastState > 300) { lastState = performance.now(); poll(); }
 }, 100);
 
@@ -230,6 +272,9 @@ function fail() {
 }
 
 function show(s) {
+  last = s;
+  if (cal && s.mode && s.mode !== cal.mode) closeCal();   // another phone switched modes
+  paintCalHubs();
   if (!gotSpeed && s.speed) {   // start from the PC's speed (another phone may have set it)
     gotSpeed = true; speed = s.speed;
     $("speed").min = s.min_speed; $("speed").value = speed; $("speedval").textContent = speed + "%";
@@ -270,6 +315,159 @@ function meter(side, v) {
   el.style.background = f >= 0 ? "var(--accent)" : "var(--bad)";
   $("val" + side).textContent = v > 0 ? "+" + v : v;
 }
+
+// ---------- calibration (same steps as the desktop app) ----------
+const ARROWS = [["fwd", "▲"], ["back", "▼"], ["left", "◀"], ["right", "▶"]];
+const MOTIONS = [["fwd", "Forward"], ["back", "Backward"], ["left", "Left"], ["right", "Right"]];
+const WHEELS = [["FL", "Front L"], ["FR", "Front R"], ["RL", "Rear L"], ["RR", "Rear R"]];
+const PORTS = [["front", 1], ["front", 2], ["rear", 1], ["rear", 2]];
+let last = {};                      // latest state from the PC
+let cal = null;                     // the calibration being edited, while the screen is open
+let chipList = [];                  // [{el, on()}] answer buttons to repaint
+let calTest = null, calKey = null, calStarted = 0, calStopTimer = null;
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function chip(parent, text, on, pick) {
+  const b = el("button", "chip", text);
+  b.addEventListener("click", () => { pick(); paintCal(); });
+  chipList.push({ el: b, on });
+  parent.append(b);
+}
+
+function openCal() {
+  if (!last.calibration) return;
+  releaseAll();
+  const c = last.calibration;
+  cal = last.mode === "dual"
+    ? { mode: "dual", truck: { front: c.truck.front.map(p => [...p]), rear: c.truck.rear.map(p => [...p]) } }
+    : { mode: "single", choice: { ...c.choice } };
+  $("calTitle").textContent = cal.mode === "dual" ? "Calibrate 4×4 truck" : "Calibrate";
+  $("calHint").textContent = cal.mode === "dual"
+    ? "Lift the truck so its wheels are off the ground. Tap Test: one motor turns for a second (hold for longer). Then tap which wheel turned and which way it rolled."
+    : "Tap Test next to an arrow and watch the car: it moves for a second (hold for longer). Then tap what the car actually did.";
+  buildCal();
+  paintCal();
+  paintCalHubs();
+  $("calSheet").classList.add("show");
+  $("calSheet").scrollTop = 0;
+}
+function closeCal() { calStop(); cal = null; $("calSheet").classList.remove("show"); }
+
+function buildCal() {
+  const body = $("calBody"), ms = last.calibration.test_ms;
+  body.innerHTML = ""; chipList = [];
+  if (cal.mode === "single") {
+    for (const [arrow, sym] of ARROWS) {
+      const row = el("div", "calrow"), top = el("div", "top"), chips = el("div", "chips");
+      const test = el("button", "test", "Test");
+      holdable(test, "a" + arrow, () => ({ kind: "arrow", arrow }), ms);
+      top.append(el("span", "sym", sym), el("b", "", "made the car go:"), test);
+      for (const [motion, name] of MOTIONS) {
+        chip(chips, name, () => cal.choice[arrow] === motion, () => {
+          for (const a in cal.choice) if (cal.choice[a] === motion) cal.choice[a] = null;   // each motion once
+          cal.choice[arrow] = motion;
+        });
+      }
+      row.append(top, chips); body.append(row);
+    }
+    return;
+  }
+  PORTS.forEach(([slot, port], i) => {
+    const p = cal.truck[slot][port - 1];   // [wheel, sign], edited in place
+    const row = el("div", "calrow"), top = el("div", "top"), wheels = el("div", "chips"), dirs = el("div", "chips two");
+    const test = el("button", "test", "Test");
+    holdable(test, "p" + i, () => ({ kind: "port", port: [slot, port] }), ms);
+    top.append(el("b", "", `${i + 1}   ${slot === "front" ? "Front" : "Rear"} hub · port ${port}`), test);
+    for (const [wheel, name] of WHEELS) {
+      chip(wheels, name, () => p[0] === wheel, () => {
+        for (const [s, q] of PORTS) if (cal.truck[s][q - 1][0] === wheel) cal.truck[s][q - 1][0] = null;   // each wheel once
+        p[0] = wheel;
+      });
+    }
+    chip(dirs, "Forward", () => p[1] === 1, () => { p[1] = 1; });
+    chip(dirs, "Backward", () => p[1] === -1, () => { p[1] = -1; });
+    row.append(top, wheels, dirs); body.append(row);
+  });
+  const row = el("div", "calrow"), checks = el("div", "checks");
+  row.append(el("p", "hint", "Check: hold an arrow to drive the truck with these settings. On ▲ all four wheels should roll forward."));
+  for (const [dir, sym] of ARROWS) {
+    const b = el("button", "check", sym);
+    holdable(b, "c" + dir, () => ({ kind: "check", held: [dir], truck: cal.truck }), 0);
+    checks.append(b);
+  }
+  row.append(checks); body.append(row);
+}
+
+function calReason() {
+  if (cal.mode === "single") {
+    if (ARROWS.some(([a]) => !cal.choice[a])) return "Tap what the car did for every arrow.";
+    const pair = [cal.choice.fwd, cal.choice.back].sort().join();
+    if (pair !== "back,fwd" && pair !== "left,right")
+      return "⚠ ▲ and ▼ are exact opposites, so they must be Forward + Backward or Left + Right. Test them again.";
+    return "";
+  }
+  return PORTS.some(([s, p]) => !cal.truck[s][p - 1][0]) ? "Tap the wheel each motor turns." : "";
+}
+function paintCal() {
+  chipList.forEach(c => c.el.classList.toggle("on", c.on()));
+  const reason = calReason(), msg = $("calMsg");
+  msg.textContent = reason || (cal.mode === "dual" ? "✓ Complete. Check with the arrows, then Save." : "✓ Looks good. Tap Save.");
+  msg.className = "calmsg " + (!reason ? "ok" : reason.startsWith("⚠") ? "bad" : "");
+  $("calSave").disabled = !!reason;
+  paintTesting();
+}
+function paintTesting() {
+  document.querySelectorAll("#calBody [data-hold]").forEach(b => b.classList.toggle("on", b.dataset.hold === calKey));
+}
+function paintCalHubs() {
+  if (!cal) return;
+  const waiting = (last.hubs || []).filter(h => !h.connected).map(h => h.title.toLowerCase());
+  $("calHubs").textContent = waiting.length ? `Connect the ${waiting.join(" and ")} first. ${last.status || ""}` : "";
+}
+
+// A test runs while its button is held, and at least `minMs` (so a quick tap is visible)
+function holdable(btn, key, payload, minMs) {
+  btn.dataset.hold = key;
+  btn.addEventListener("pointerdown", e => {
+    e.preventDefault(); btn.setPointerCapture(e.pointerId);
+    clearTimeout(calStopTimer); calStopTimer = null;
+    calTest = payload; calKey = key; calStarted = performance.now();
+    paintTesting(); sendCal();
+  });
+  const up = () => {
+    if (calKey !== key) return;
+    clearTimeout(calStopTimer);
+    const left = minMs - (performance.now() - calStarted);
+    if (left > 0) calStopTimer = setTimeout(calStop, left); else calStop();
+  };
+  ["pointerup", "pointercancel", "lostpointercapture"].forEach(t => btn.addEventListener(t, up));
+}
+function calStop() {
+  clearTimeout(calStopTimer); calStopTimer = null;
+  if (calTest) { calTest = null; calKey = null; post("/stop", {}); }
+  paintTesting();
+}
+async function sendCal() { if (calTest) await post("/cal/test", calTest()); }
+
+$("calOpen").addEventListener("click", openCal);
+$("calClose").addEventListener("click", closeCal);
+$("calSave").addEventListener("click", async () => {
+  if (!cal || calReason()) return;
+  calStop();
+  const body = cal.mode === "dual" ? { mode: "dual", truck: cal.truck } : { mode: "single", choice: cal.choice };
+  try {
+    const r = await fetch("/cal/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const s = await r.json();
+    show(s);
+    if (s.saved) closeCal();
+    else { $("calMsg").textContent = s.error; $("calMsg").className = "calmsg bad"; }
+  } catch (e) { fail(); }
+});
 
 poll();
 </script>

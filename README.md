@@ -94,8 +94,13 @@ one: `python rc_car_phone.py --port 8090`. Add `--dual` or `--single` to choose 
 
 The phone page has a d-pad (hold two arrows to curve), STOP, HORN, a speed slider and light
 colours. It uses the same steering and calibration as the desktop app (in dual mode, the truck
-calibration), so calibrate in the desktop app first. The controls are dimmed until every hub the
-mode needs is connected. If you lift your finger, lock the phone or lose Wi-Fi, the car stops
+calibration). The controls are dimmed until every hub the mode needs is connected.
+
+**Calibrating from the phone:** tap **Calibrate…**. It works like the desktop app's
+[calibration](#calibration): tap **Test** (the motor runs for a second, or hold for longer),
+then tap what happened. In dual mode that's the wheel and the direction for each of the four
+motors, followed by a check drive with the arrows. Tap **Save**. The phone and the desktop
+app share one calibration file, so a calibration made on either works on both. If you lift your finger, lock the phone or lose Wi-Fi, the car stops
 within about a third of a second. In dual mode, if either hub disconnects, both stop.
 
 ## On a Mac

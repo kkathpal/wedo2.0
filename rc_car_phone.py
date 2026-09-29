@@ -76,6 +76,7 @@ class Controller:
         self.slots = {key: Slot(key, title, led)
                       for slots in rc.MODES.values() for key, title, led in slots}
         self.held = set()
+        self.test = None            # calibration test running: {slot: (port 1, port 2) power}
         self.speed = DEFAULT_SPEED
         self.wheels = (0, 0)        # (left, right) wheel power, for the page's meters
         self.last_command = 0.0
@@ -103,17 +104,28 @@ class Controller:
             if isinstance(speed, (int, float)):
                 self.speed = int(max(rc.MIN_POWER, min(100, speed)))
             self.held = {d for d in held if d in DIRECTIONS}
+            self.test = None
             self.last_command = time.monotonic()
             self._update()
 
     def stop(self):
         with self.lock:
-            self.held = set()
-            self._update()
+            self._halt()
+
+    def _halt(self):
+        """Stop driving and testing (call with the lock held)."""
+        self.held = set()
+        self.test = None
+        self._update()
 
     def _update(self):
         self._reload_calibration()
         active = self._active()
+        if self.test is not None:   # calibrating: raw test power, no steering or calibration
+            self.wheels = (0, 0)
+            for slot in self.slots.values():
+                slot.target = self.test.get(slot.key, (0, 0)) if slot in active else (0, 0)
+            return
         # Dual mode drives only with both hubs, so the truck never drags a dead axle
         ready = all(slot.hub for slot in active)
         self.wheels = rc.wheel_powers(self.held, self.speed) if ready else (0, 0)
@@ -131,8 +143,7 @@ class Controller:
             if mode not in rc.MODES or mode == self.mode:
                 return
             self.mode = mode
-            self.held = set()
-            self._update()
+            self._halt()
         try:
             rc.write_settings(mode=mode)   # rc_car.pyw opens in the same mode
         except OSError:
@@ -145,8 +156,57 @@ class Controller:
         """Stop the car if the phone that's driving goes quiet (Wi-Fi drop, app switch...)."""
         while True:
             time.sleep(0.05)
-            if self.held and time.monotonic() - self.last_command > PHONE_TIMEOUT:
+            if (self.held or self.test) and time.monotonic() - self.last_command > PHONE_TIMEOUT:
                 self.stop()
+
+    # ----- calibrating from the phone (same steps as rc_car.pyw's windows) -----
+    def cal_test(self, data):
+        """Run one calibration test while the phone keeps re-sending it:
+        single {"kind": "arrow", "arrow": "fwd"}: that arrow's raw pattern on the hub;
+        dual {"kind": "port", "port": ["front", 1]}: that one motor forward;
+        dual {"kind": "check", "held": [...], "truck": {...}}: drive with unsaved truck settings."""
+        with self.lock:
+            self.held = set()
+            self.last_command = time.monotonic()
+            power = rc.motor_power(self.speed)
+            kind, test = data.get("kind"), {}
+            if kind == "arrow" and self.mode == "single" and data.get("arrow") in rc.TEST_PATTERNS:
+                a, b = rc.TEST_PATTERNS[data["arrow"]]
+                test["car"] = (a * power, b * power)
+            elif kind == "port" and self.mode == "dual":
+                port = tuple(data.get("port") or ())
+                if port in rc.TRUCK_PORTS:
+                    target = [0, 0]
+                    target[port[1] - 1] = power
+                    test[port[0]] = tuple(target)
+            elif kind == "check" and self.mode == "dual":
+                truck = parse_truck(data.get("truck"))
+                held = {d for d in data.get("held", []) if d in DIRECTIONS}
+                if truck and all(slot.hub for slot in self._active()):
+                    left, right = rc.wheel_powers(held, self.speed)
+                    test = {key: rc.truck_port_powers(left, right, truck[key]) for key in ("front", "rear")}
+            self.test = test or None
+            self._update()
+
+    def save_calibration(self, data):
+        """Save a calibration made on the phone. Returns an error message, or "" if saved."""
+        try:
+            if data.get("mode") == "dual":
+                truck = parse_truck(data.get("truck"))
+                if not truck:
+                    return "Pick a wheel and a direction for every motor (each wheel once)."
+                rc.save_truck(truck)
+            else:
+                cal, reason = rc.cal_from_choice(data.get("choice"))
+                if not cal:
+                    return reason
+                rc.save_calibration(cal)
+        except OSError as e:
+            return f"Couldn't save the calibration file: {e.strerror or e}"
+        with self.lock:
+            self.cal_mtime = -1   # re-read now
+            self._halt()
+        return ""
 
     def _connected(self):
         return [slot.hub for slot in self._active() if slot.hub]
@@ -180,6 +240,11 @@ class Controller:
             "speed": self.speed, "min_speed": rc.MIN_POWER,
             "lights": [{"name": n, "color": c} for n, c in rc.LIGHTS],
             "calibrated": self.truck_saved if self.mode == "dual" else self.calibrated,
+            "calibration": {   # the current settings, to pre-fill the phone's Calibrate screen
+                "choice": rc.predict_choice(self.cal),
+                "truck": {key: [list(p) for p in self.truck[key]] for key in ("front", "rear")},
+                "test_ms": rc.TEST_MIN_MS,
+            },
             "warning": "  ·  ".join(f"{h['title']}: {h['warning']}" for h in hubs if h["warning"]),
         }
 
@@ -255,6 +320,16 @@ class Controller:
             pass
 
 
+def parse_truck(data):
+    """A truck calibration sent by the phone ({"front": [[wheel, sign], ...], "rear": ...}),
+    or None if it isn't complete and valid."""
+    try:
+        truck = {key: tuple((wheel, int(sign)) for wheel, sign in data[key]) for key in ("front", "rear")}
+    except (KeyError, TypeError, ValueError):
+        return None
+    return truck if rc.valid_truck(truck) else None
+
+
 def mode_from_args():
     """--dual / --single on the command line, else the mode rc_car.pyw used last."""
     if "--dual" in sys.argv:
@@ -320,6 +395,11 @@ class Handler(BaseHTTPRequestHandler):
                 controller.light(data["name"])
         elif self.path == "/mode":
             controller.set_mode(data.get("mode"))
+        elif self.path == "/cal/test":
+            controller.cal_test(data)
+        elif self.path == "/cal/save":
+            error = controller.save_calibration(data)
+            return self._json({**controller.state(), "saved": not error, "error": error})
         else:
             return self.send_error(404)
         self._json(controller.state())
