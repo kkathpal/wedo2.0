@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+
+# Per-car settings written by rc_car.py
+rc_car_calibration.json
+
+# Secrets / local environment
+.env
+*.key
+*.pem
