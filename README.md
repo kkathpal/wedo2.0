@@ -6,7 +6,7 @@ to the WeDo Smart Hub over Bluetooth, so nothing has to be installed on the hub.
 - **Single mode**: one hub, one motor per side (tank steering).
 - **Dual mode**: a 4×4 truck with two hubs. The front hub drives two wheels and the rear hub
   the other two, all from the same keys.
-- **Phone controller**: drive from any phone browser on the same Wi-Fi (single mode).
+- **Phone controller**: drive from any phone browser on the same Wi-Fi, in either mode.
 
 ## What you need
 
@@ -80,16 +80,23 @@ both stop.
    python rc_car_phone.py
    ```
 
-3. Press the green button on the hub. Its light turns blue when connected.
-4. On your phone (on the same Wi-Fi), open the `http://…:<port>` address the server prints.
+3. On your phone (on the same Wi-Fi), open the `http://…:<port>` address the server prints.
    The first time, allow Python through the Windows firewall for private networks.
+4. Pick **Single** or **Dual · 4×4 truck** at the top of the page. It starts in the mode the
+   desktop app used last.
+5. Press the green button on the hub:
+   - **Single:** the hub's light turns blue when connected.
+   - **Dual:** press the **front** hub's button first (its light turns white), then the **rear**
+     hub's (red). The page shows each hub's status and what to press next.
 
 The server picks a random free port (8000–8999) each time. To always use the same address, give
-one: `python rc_car_phone.py --port 8090`.
+one: `python rc_car_phone.py --port 8090`. Add `--dual` or `--single` to choose the starting mode.
 
 The phone page has a d-pad (hold two arrows to curve), STOP, HORN, a speed slider and light
-colours. It uses the same steering and single-mode calibration as the desktop app. If you lift
-your finger, lock the phone or lose Wi-Fi, the car stops within about a third of a second.
+colours. It uses the same steering and calibration as the desktop app (in dual mode, the truck
+calibration), so calibrate in the desktop app first. The controls are dimmed until every hub the
+mode needs is connected. If you lift your finger, lock the phone or lose Wi-Fi, the car stops
+within about a third of a second. In dual mode, if either hub disconnects, both stop.
 
 ## On a Mac
 

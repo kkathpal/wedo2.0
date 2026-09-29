@@ -69,6 +69,21 @@
 
   .warn { color: var(--accent); font-size: 12px; }
   .warn:empty { display: none; }
+
+  .setup { margin-bottom: 12px; }
+  .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; background: var(--bg);
+    border-radius: 10px; padding: 4px; }
+  .modes button { padding: 8px 4px; border-radius: 8px; background: transparent; color: var(--muted);
+    font-weight: 700; font-size: 13px; }
+  .modes button.on { background: var(--accent); color: #111; }
+  .hubs { margin-top: 10px; display: grid; gap: 6px; }
+  .hub { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
+  .hub i { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); flex: none; }
+  .hub.ok i { background: var(--good); }
+  .hub b { flex: none; }
+  .hub span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .hub.ok span { color: var(--fg); }
+  .pad.off { opacity: .35; }
   footer { color: var(--muted); font-size: 11px; text-align: center; padding: 12px 0 14px; }
 
   .overlay { position: fixed; inset: 0; background: #1b1c21ee; display: none; place-items: center;
@@ -84,6 +99,14 @@
   <h1>WeDo RC</h1>
   <span class="status" id="status">connecting…</span>
 </header>
+
+<div class="card setup">
+  <div class="modes" id="modes">
+    <button data-mode="single">Single · 1 hub</button>
+    <button data-mode="dual">Dual · 4×4 truck</button>
+  </div>
+  <div class="hubs" id="hubs"></div>
+</div>
 
 <div class="layout">
   <section class="card">
@@ -157,6 +180,15 @@ addEventListener("keydown", e => {
 });
 addEventListener("keyup", e => { if (KEYMAP[e.key]) { keys.delete(KEYMAP[e.key]); recompute(); } });
 
+let mode = null, modeTapped = -1e9;
+document.querySelectorAll("#modes button").forEach(b => b.addEventListener("click", () => {
+  if (b.dataset.mode === mode) return;
+  pointers.clear(); keys.clear(); recompute();
+  mode = b.dataset.mode; modeTapped = performance.now(); paintModes();
+  post("/mode", { mode });
+}));
+function paintModes() { document.querySelectorAll("#modes button").forEach(b => b.classList.toggle("on", b.dataset.mode === mode)); }
+
 $("speed").addEventListener("input", e => {
   speed = +e.target.value; $("speedval").textContent = speed + "%";
   send(true);   // apply now, even mid-drive
@@ -211,11 +243,23 @@ function show(s) {
       $("lights").appendChild(b);
     }
   }
-  const ok = s.connected;
-  $("overlay").classList.toggle("show", !ok);
-  if (!ok) { $("ovTitle").textContent = "Waiting for the hub"; $("ovText").textContent = s.status || "Press the green button on the hub."; }
+  $("overlay").classList.remove("show");   // the PC answered
+  // follow the PC's mode (another phone may switch it), but not a reply sent before our own tap
+  if (s.mode && performance.now() - modeTapped > 1000) { mode = s.mode; paintModes(); }
+  const box = $("hubs"); box.innerHTML = "";
+  for (const h of s.hubs || []) {
+    const row = document.createElement("div");
+    row.className = "hub" + (h.connected ? " ok" : "");
+    row.innerHTML = "<i></i><b></b><span></span>";
+    row.querySelector("b").textContent = h.title;
+    row.querySelector("span").textContent = h.status;
+    box.appendChild(row);
+  }
+  const ok = s.connected;   // every hub this mode needs is connected
+  $("pad").classList.toggle("off", !ok);
   $("dot").style.background = ok ? "var(--good)" : "var(--accent)";
-  $("status").textContent = ok ? (s.calibrated ? "Connected · calibrated" : "Connected") : "";
+  const what = s.mode === "dual" ? "truck calibrated" : "calibrated";
+  $("status").textContent = ok ? (s.calibrated ? "Connected · " + what : "Connected · not calibrated") : "Waiting for hubs";
   meter("L", s.left || 0); meter("R", s.right || 0);
   $("warn").textContent = s.warning || "";
 }

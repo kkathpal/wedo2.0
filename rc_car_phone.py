@@ -1,17 +1,23 @@
 """WeDo RC for phones: drive the WeDo 2.0 car from any phone browser on your Wi-Fi.
 
-This PC keeps the Bluetooth connection to the hub and serves a touch controller page
+This PC keeps the Bluetooth connection to the hubs and serves a touch controller page
 to phones on the same Wi-Fi. It drives exactly like rc_car.pyw: same turning, and the
-same calibration (rc_car_calibration.json, made with Setup → Calibrate in rc_car.pyw).
+same calibration (rc_car_calibration.json, made with Calibrate… in rc_car.pyw).
+
+Single mode: one hub. Dual mode: the 4x4 truck with a front and a rear hub, using the
+truck calibration. The hubs connect in order: press the FRONT hub's green button first
+(its light turns white), then the REAR hub's (red). It drives only while both are
+connected. Switch modes on the phone page; it starts in the mode rc_car.pyw used last.
 
 Run:   python rc_car_phone.py               (uses a random free port from 8000-8999)
        python rc_car_phone.py --port 8090   (use this port)
-Then press the green button on the hub, and open the printed http://<this PC>:<port>
-address on your phone. (Close rc_car.pyw first: the hub takes one connection at a time.)
+       python rc_car_phone.py --dual        (start in dual mode; --single for single)
+Then press the green button on the hub(s), and open the printed http://<this PC>:<port>
+address on your phone. (Close rc_car.pyw first: a hub takes one connection at a time.)
 
 Safety: the phone re-sends the held buttons every ~100 ms, and this server stops the
 car if the phone goes quiet for PHONE_TIMEOUT, so lifting your finger, locking the
-phone or losing Wi-Fi stops the car.
+phone or losing Wi-Fi stops the car. In dual mode, if either hub drops, both stop.
 """
 import asyncio
 import json
@@ -36,24 +42,49 @@ PHONE_TIMEOUT = 0.35     # stop if the phone sends nothing for this long while d
 DEFAULT_SPEED = 70
 DIRECTIONS = {"fwd", "back", "left", "right"}
 LIGHTS = [name for name, _ in rc.LIGHTS]
+PHONE_LED = {"car": "blue"}   # single mode's hub turns blue when driven from the phone
+
+
+class Slot:
+    """One hub position: the single car's hub, or dual mode's front or rear hub."""
+
+    def __init__(self, key, title, led):
+        self.key, self.title, self.led = key, title, PHONE_LED.get(key, led)
+        self.hub = None
+        self.target = (0, 0)   # (port 1, port 2) power this hub should have now
+        self.status = "Starting…"
+
+    def label(self):
+        hub = self.hub   # may drop to None on the Bluetooth thread at any moment
+        return f"{hub.name} …{hub.address[-5:]}" if hub and hub.address else ""
+
+    def ask(self):
+        """What to press to connect this hub."""
+        if self.key == "car":
+            return "Press the green button on the hub"
+        return f"Press the green button on the {self.title.split()[0].upper()} hub (its light turns {self.led})"
 
 
 class Controller:
-    """Owns the hub connection; turns phone button states into motor power."""
+    """Owns the hub connections; turns phone button states into motor power."""
 
-    def __init__(self):
+    def __init__(self, mode):
         self.lock = threading.Lock()
         self.loop = None
-        self.hub = None
-        self.status = "Starting…"
+        self.mode = mode
+        self.mode_changed = None    # asyncio.Event, set when the phone switches mode
+        self.slots = {key: Slot(key, title, led)
+                      for slots in rc.MODES.values() for key, title, led in slots}
         self.held = set()
         self.speed = DEFAULT_SPEED
         self.wheels = (0, 0)        # (left, right) wheel power, for the page's meters
-        self.target = (0, 0)        # (port 1, port 2) power the hub should have now
         self.last_command = 0.0
-        self.cal, self.cal_mtime = rc.DEFAULT_CAL, None
-        self.calibrated = False
+        self.cal_mtime = None
         self._reload_calibration()
+
+    def _active(self):
+        """The hub slots the current mode drives."""
+        return [self.slots[key] for key, _, _ in rc.MODES[self.mode]]
 
     # ----- driving (called from the web server threads) -----
     def _reload_calibration(self):
@@ -62,8 +93,10 @@ class Controller:
             mtime = os.path.getmtime(rc.CAL_FILE)
         except OSError:
             mtime = None
-        if mtime != self.cal_mtime:
-            (self.cal, self.calibrated), self.cal_mtime = rc.load_calibration(), mtime
+        if mtime != self.cal_mtime or self.cal_mtime is None:
+            self.cal, self.calibrated = rc.load_calibration()
+            self.truck, self.truck_saved = rc.load_truck()
+            self.cal_mtime = mtime
 
     def drive(self, held, speed=None):
         with self.lock:
@@ -80,8 +113,33 @@ class Controller:
 
     def _update(self):
         self._reload_calibration()
-        self.wheels = rc.wheel_powers(self.held, self.speed)
-        self.target = rc.port_powers(*self.wheels, self.cal)
+        active = self._active()
+        # Dual mode drives only with both hubs, so the truck never drags a dead axle
+        ready = all(slot.hub for slot in active)
+        self.wheels = rc.wheel_powers(self.held, self.speed) if ready else (0, 0)
+        for slot in self.slots.values():
+            if slot not in active:
+                slot.target = (0, 0)
+            elif self.mode == "dual":
+                slot.target = rc.truck_port_powers(*self.wheels, self.truck[slot.key])
+            else:
+                slot.target = rc.port_powers(*self.wheels, self.cal)
+
+    def set_mode(self, mode):
+        """Switch single/dual: lets the current hubs go and starts connecting the new mode's."""
+        with self.lock:
+            if mode not in rc.MODES or mode == self.mode:
+                return
+            self.mode = mode
+            self.held = set()
+            self._update()
+        try:
+            rc.write_settings(mode=mode)   # rc_car.pyw opens in the same mode
+        except OSError:
+            pass
+        loop, changed = self.loop, self.mode_changed
+        if loop and changed:
+            loop.call_soon_threadsafe(changed.set)
 
     def _safety(self):
         """Stop the car if the phone that's driving goes quiet (Wi-Fi drop, app switch...)."""
@@ -90,78 +148,125 @@ class Controller:
             if self.held and time.monotonic() - self.last_command > PHONE_TIMEOUT:
                 self.stop()
 
-    def run_on_hub(self, make_coro):
-        """Run a hub command (horn, light) on the Bluetooth loop, if connected."""
-        hub, loop = self.hub, self.loop
-        if hub and loop:
-            asyncio.run_coroutine_threadsafe(make_coro(hub), loop)
+    def _connected(self):
+        return [slot.hub for slot in self._active() if slot.hub]
+
+    def horn(self):
+        hubs = self._connected()
+        if hubs and self.loop:   # one hub is enough (two would beep out of step)
+            asyncio.run_coroutine_threadsafe(hubs[0].beep(392, 250), self.loop)
+
+    def light(self, name):
+        for hub in self._connected():
+            asyncio.run_coroutine_threadsafe(hub.led(name), self.loop)
 
     def state(self):
         with self.lock:
             self._reload_calibration()
-        hub = self.hub   # may drop to None on the Bluetooth thread at any moment
-        motors = list(dict(hub.ports).values()).count(rc.MOTOR) if hub else 0
+        hubs = []
+        for slot in self._active():
+            hub = slot.hub
+            motors = list(dict(hub.ports).values()).count(rc.MOTOR) if hub else 0
+            hubs.append({"title": slot.title, "connected": hub is not None,
+                         "status": f"Connected · {slot.label()}" if hub else slot.status,
+                         "warning": "" if not hub or motors == 2 else "plug a motor into both ports"})
+        ready = all(h["connected"] for h in hubs)
         return {
-            "connected": hub is not None,
-            "status": self.status,
+            "connected": ready,
+            "mode": self.mode,
+            "hubs": hubs,
+            "status": next((h["status"] for h in hubs if not h["connected"]), "Connected"),
             "left": self.wheels[0], "right": self.wheels[1],
             "speed": self.speed, "min_speed": rc.MIN_POWER,
             "lights": [{"name": n, "color": c} for n, c in rc.LIGHTS],
-            "calibrated": self.calibrated,
-            "warning": "" if not hub or motors == 2 else "Plug a motor into both ports of the hub",
+            "calibrated": self.truck_saved if self.mode == "dual" else self.calibrated,
+            "warning": "  ·  ".join(f"{h['title']}: {h['warning']}" for h in hubs if h["warning"]),
         }
 
     # ----- Bluetooth (runs on the main thread's asyncio loop) -----
     async def run(self):
         self.loop = asyncio.get_running_loop()
         threading.Thread(target=self._safety, daemon=True).start()
-        try:
-            while True:
-                await self._connect_and_drive()
-                await asyncio.sleep(1)
-        finally:   # Ctrl+C: stop the motors and let the hub go
-            hub, self.hub = self.hub, None
-            if hub:
-                try:
-                    await asyncio.wait_for(hub.disconnect(), 3)
-                except Exception:
-                    pass
+        while True:
+            self.mode_changed = asyncio.Event()
+            active = self._active()
+            tasks = [asyncio.create_task(self._keep_connected(slot, active[:i]))
+                     for i, slot in enumerate(active)]
+            try:
+                await self.mode_changed.wait()
+            finally:   # mode switch, or Ctrl+C: stop the motors and let the hubs go
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _connect_and_drive(self):
-        self.status = "Searching… press the green button on the hub"
-        hub = rc.WeDoHub()
+    async def _keep_connected(self, slot, before):
+        """Keep one hub connected and fed with its target power. A hub waits until the
+        slots `before` it are connected, so in dual mode the first green button pressed
+        is always the front hub's."""
+        while True:
+            if any(s.hub is None for s in before):
+                slot.status = f"Waiting for the {before[-1].title.lower()} first"
+                await asyncio.sleep(0.2)
+                continue
+            slot.status = slot.ask()
+            hub = rc.WeDoHub()
+            taken = [s.hub.address for s in self.slots.values() if s.hub and s.hub.address]
+            try:
+                await hub.connect(timeout=20, exclude=taken)
+            except asyncio.CancelledError:
+                await self._let_go(hub)
+                raise
+            except RuntimeError:   # scan timed out: keep looking
+                continue
+            except Exception as e:   # Bluetooth off, adapter busy, ...
+                slot.status = f"Bluetooth problem: {e}"
+                print(slot.status)
+                await asyncio.sleep(2)
+                continue
+            slot.hub = hub
+            print(f"{slot.title} connected ({slot.label()})")
+            self.stop()   # dual mode may be ready to drive now
+            try:
+                await hub.led(slot.led)
+                sent = (None, None)
+                while hub.client.is_connected:
+                    target = slot.target
+                    if target[0] != sent[0]:
+                        await hub.motor(1, target[0])
+                    if target[1] != sent[1]:
+                        await hub.motor(2, target[1])
+                    sent = target
+                    await asyncio.sleep(0.02)
+                print(f"{slot.title} disconnected: press its green button to reconnect")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"{slot.title} connection lost: {e}")
+            finally:
+                slot.hub = None
+                self.stop()   # in dual mode this stops the other hub too
+                await self._let_go(hub)
+
+    @staticmethod
+    async def _let_go(hub):
         try:
-            await hub.connect(timeout=20)
-        except RuntimeError:   # scan timed out
-            self.status = "Hub not found yet: press the green button on the hub"
-            return
-        except Exception as e:   # Bluetooth off, adapter busy, ...
-            self.status = f"Bluetooth problem: {e}"
-            print(self.status)
-            return
-        self.hub = hub
-        self.status = "Connected"
-        print("Hub connected: open the page on your phone")
-        try:
-            await hub.led("blue")   # blue = driven from the phone
-            sent = (None, None)
-            while hub.client.is_connected:
-                target = self.target
-                if target[0] != sent[0]:
-                    await hub.motor(1, target[0])
-                if target[1] != sent[1]:
-                    await hub.motor(2, target[1])
-                sent = target
-                await asyncio.sleep(0.02)
-        except Exception as e:
-            print(f"Hub connection lost: {e}")
-        self.hub = None
-        self.stop()
-        self.status = "Hub disconnected: reconnecting…"
-        print("Hub disconnected, searching again (press the green button)")
+            await asyncio.wait_for(hub.disconnect(), 3)
+        except Exception:
+            pass
 
 
-controller = Controller()
+def mode_from_args():
+    """--dual / --single on the command line, else the mode rc_car.pyw used last."""
+    if "--dual" in sys.argv:
+        return "dual"
+    if "--single" in sys.argv:
+        return "single"
+    saved = rc.read_settings().get("mode")
+    return saved if saved in rc.MODES else "single"
+
+
+
+controller = Controller(mode_from_args())
 
 
 class Server(ThreadingHTTPServer):
@@ -209,10 +314,12 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/stop":
             controller.stop()
         elif self.path == "/horn":
-            controller.run_on_hub(lambda hub: hub.beep(392, 250))
+            controller.horn()
         elif self.path == "/light":
             if data.get("name") in LIGHTS:
-                controller.run_on_hub(lambda hub: hub.led(data["name"]))
+                controller.light(data["name"])
+        elif self.path == "/mode":
+            controller.set_mode(data.get("mode"))
         else:
             return self.send_error(404)
         self._json(controller.state())
@@ -276,11 +383,16 @@ def main():
     server = start_server(port_from_args())
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    print("\nWeDo RC phone controller")
+    dual = controller.mode == "dual"
+    print(f"\nWeDo RC phone controller ({'dual: 4x4 truck with 2 hubs' if dual else 'single hub'})")
     for ip in lan_addresses():
         print(f"  open on your phone:  http://{ip}:{port}")
     print("  (phone must be on the same Wi-Fi; allow Python through the firewall if asked)")
-    print("  Press the green button on the hub to connect.  Ctrl+C to quit.")
+    if dual:
+        print("  Press the FRONT hub's green button first (light turns white), then the REAR hub's (red).")
+    else:
+        print("  Press the green button on the hub to connect.")
+    print("  Switch single/dual on the phone page.  Ctrl+C to quit.")
     try:
         # Bluetooth on the main thread: bleak is happiest there on Windows
         asyncio.run(controller.run())
