@@ -10,12 +10,15 @@ to the WeDo Smart Hub over Bluetooth, so nothing has to be installed on the hub.
 
 ## What you need
 
-- A computer with Bluetooth (Windows 10/11 works; macOS and Linux should too).
+- A computer with Bluetooth: Windows 10/11 or a Mac (see [On a Mac](#on-a-mac)). Linux should
+  work too.
 - [Python 3](https://www.python.org/downloads/) and the `bleak` Bluetooth package:
 
   ```
   python -m pip install bleak
   ```
+
+  On a Mac, use `python3` instead of `python` in all the commands here.
 
 - One WeDo 2.0 Smart Hub (two for dual mode) with a motor in each port.
 
@@ -88,13 +91,29 @@ The phone page has a d-pad (hold two arrows to curve), STOP, HORN, a speed slide
 colours. It uses the same steering and single-mode calibration as the desktop app. If you lift
 your finger, lock the phone or lose Wi-Fi, the car stops within about a third of a second.
 
+## On a Mac
+
+- **Install Python from [python.org](https://www.python.org/downloads/macos/).** Apple's built-in
+  `/usr/bin/python3` comes with an old Tk that can show blank windows. With Homebrew Python, also
+  run `brew install python-tk`.
+- **Run from Terminal:** `python3 rc_car.pyw`. On a Mac, double-clicking a `.pyw` file doesn't
+  start it without a console, as it does on Windows.
+- **Allow Bluetooth.** The first time, macOS asks whether Terminal (or VS Code, if you run it
+  from there) may use Bluetooth. Click Allow. If you said no, the hub is never found: turn it on in
+  System Settings → Privacy & Security → Bluetooth, then restart the app.
+- **Phone controller:** if macOS asks whether Python may accept incoming network connections,
+  click Allow, or phones can't reach it.
+
+Holding a key works the same as on Windows, and the app scales its text to match.
+
 ## Troubleshooting
 
 - **Nothing happens when I double-click `rc_car.pyw`**: run `python rc_car.pyw` in a terminal
   to see the error. If `bleak` is missing, a message box tells you how to install it.
 - **"Hub not found"**: press the hub's green button right after clicking Connect (its light
   blinks while it's looking). Check the computer's Bluetooth is on, and that no other program or
-  tablet is connected to the hub.
+  tablet is connected to the hub. On a Mac, check Terminal is allowed to use Bluetooth (see
+  [On a Mac](#on-a-mac)).
 - **The car goes the wrong way**: calibrate again.
 - **A wheel doesn't turn on curves**: WeDo motors stall at low power. Raise `MIN_POWER` near the
   top of `rc_car.pyw` (for example to 45).

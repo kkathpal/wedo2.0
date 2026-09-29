@@ -77,6 +77,7 @@ MOTIONS = [("fwd", "Forward"), ("back", "Backward"), ("left", "Left"), ("right",
 MIN_POWER = 35
 ARC_INSIDE = 0.5   # inside wheel speed while curving (0.5 = half of the outside wheel)
 TEST_MIN_MS = 1000   # a calibration Test click runs the motor at least this long (hold for longer)
+KEY_RELEASE_MS = 40  # a key release counts only if no press follows within this (auto-repeat)
 
 
 def motor_power(power):
@@ -186,6 +187,36 @@ def truck_port_powers(left, right, ports):
     return tuple(sign * (left if wheel[1] == "L" else right) for wheel, sign in ports)
 
 
+class KeyRepeatFilter:
+    """Turns key events into clean press/release calls. macOS and Linux repeat a held
+    key as release+press pairs, which would stop and restart the motors many times a
+    second, so a release only counts if no press follows within KEY_RELEASE_MS.
+    (Windows repeats only presses; the press handlers ignore those.)"""
+
+    def __init__(self, widget, on_press, on_release):
+        self.widget, self.on_press, self.on_release = widget, on_press, on_release
+        self.pending = {}   # key -> after() id of its delayed release
+
+    def press(self, key):
+        if key in self.pending:   # auto-repeat: the key never really went up
+            self.widget.after_cancel(self.pending.pop(key))
+        self.on_press(key)
+
+    def release(self, key):
+        if key in self.pending:
+            self.widget.after_cancel(self.pending[key])
+        self.pending[key] = self.widget.after(KEY_RELEASE_MS, lambda: self._released(key))
+
+    def _released(self, key):
+        self.pending.pop(key, None)
+        self.on_release(key)
+
+    def cancel(self):
+        for after_id in self.pending.values():
+            self.widget.after_cancel(after_id)
+        self.pending.clear()
+
+
 class HubSlot:
     """One hub position (the single car's hub, or dual mode's front or rear hub)."""
 
@@ -208,6 +239,7 @@ class RCCarApp:
     def __init__(self, root):
         self.root = root
         self.pressed = set()          # active directions: fwd/back/left/right
+        self.keys = KeyRepeatFilter(root, self._press, self._release)
         self.events = queue.Queue()   # messages from the Bluetooth thread to the UI
         self.slots = {key: HubSlot(key, title, led)
                       for slots in MODES.values() for key, title, led in slots}
@@ -480,12 +512,12 @@ class RCCarApp:
     def _on_key_down(self, event):
         direction = KEYS.get(event.keysym.lower())
         if direction:
-            self._press(direction)
+            self.keys.press(direction)
 
     def _on_key_up(self, event):
         direction = KEYS.get(event.keysym.lower())
         if direction:
-            self._release(direction)
+            self.keys.release(direction)
 
     def _press(self, direction):
         if direction not in self.pressed:
@@ -498,6 +530,7 @@ class RCCarApp:
             self._update_drive()
 
     def _stop(self):
+        self.keys.cancel()
         self.pressed.clear()
         self._update_drive()
 
@@ -681,6 +714,7 @@ class CalibrationWindow:
         self.save_btn.pack(side="right")
         app._button(buttons, "Cancel", self.close).pack(side="right", padx=8)
 
+        self.keys = KeyRepeatFilter(w, self._press, self._release)
         w.bind("<KeyPress>", self._on_key_down)
         w.bind("<KeyRelease>", self._on_key_up)
         w.bind("<Escape>", lambda e: self.close())
@@ -694,15 +728,17 @@ class CalibrationWindow:
 
     def _on_key_down(self, event):
         key = KEYS.get(event.keysym.lower())
-        if key and key not in self.held:
-            self._press(key)
+        if key:
+            self.keys.press(key)
 
     def _on_key_up(self, event):
         key = KEYS.get(event.keysym.lower())
         if key:
-            self._release(key)
+            self.keys.release(key)
 
     def _press(self, key):
+        if key in self.held:   # key auto-repeat
+            return
         self.held.add(key)
         self._drive()
 
@@ -731,6 +767,7 @@ class CalibrationWindow:
         self._release(key)
 
     def _stop_test(self):
+        self.keys.cancel()
         if self.test_stop_id:
             self.win.after_cancel(self.test_stop_id)
             self.test_stop_id = None
@@ -790,6 +827,7 @@ class CalibrationWindow:
             self.close()
 
     def close(self):
+        self.keys.cancel()
         if self.test_stop_id:
             self.win.after_cancel(self.test_stop_id)
         self.held.clear()
@@ -861,6 +899,7 @@ class TruckCalibrationWindow:
         self.save_btn.pack(side="right")
         app._button(buttons, "Cancel", self.close).pack(side="right", padx=8)
 
+        self.keys = KeyRepeatFilter(w, self._key_press, self._key_release)
         w.bind("<KeyPress>", self._on_key_down)
         w.bind("<KeyRelease>", self._on_key_up)
         w.bind("<Escape>", lambda e: self.close())
@@ -872,18 +911,33 @@ class TruckCalibrationWindow:
 
     # ---- testing ----
 
+    @staticmethod
+    def _key_of(event):
+        """"1".."4" for the Test keys, "fwd"/"back"/"left"/"right" for the arrows, or None."""
+        return event.char if event.char in ("1", "2", "3", "4") else KEYS.get(event.keysym.lower())
+
     def _on_key_down(self, event):
-        if event.char in ("1", "2", "3", "4"):
-            self._test_press(TRUCK_PORTS[int(event.char) - 1])
-        elif KEYS.get(event.keysym.lower()) and KEYS[event.keysym.lower()] not in self.held:
-            self.held.add(KEYS[event.keysym.lower()])
-            self._drive()
+        key = self._key_of(event)
+        if key:
+            self.keys.press(key)
 
     def _on_key_up(self, event):
-        if event.char in ("1", "2", "3", "4"):
+        key = self._key_of(event)
+        if key:
+            self.keys.release(key)
+
+    def _key_press(self, key):
+        if key.isdigit():
+            self._test_press(TRUCK_PORTS[int(key) - 1])
+        elif key not in self.held:
+            self.held.add(key)
+            self._drive()
+
+    def _key_release(self, key):
+        if key.isdigit():
             self._test_release()
-        elif KEYS.get(event.keysym.lower()):
-            self.held.discard(KEYS[event.keysym.lower()])
+        else:
+            self.held.discard(key)
             self._drive()
 
     def _test_press(self, key):
@@ -922,6 +976,7 @@ class TruckCalibrationWindow:
             self._drive()
 
     def _stop_test(self):
+        self.keys.cancel()
         if self.test_stop_id:
             self.win.after_cancel(self.test_stop_id)
             self.test_stop_id = None
@@ -1006,6 +1061,8 @@ if __name__ == "__main__":
     except Exception:
         pass
     root = tk.Tk()
+    if sys.platform == "darwin":   # macOS Tk assumes 72 dpi, which draws text ~25% small
+        root.tk.call("tk", "scaling", 96 / 72)
     app = RCCarApp(root)
     root.protocol("WM_DELETE_WINDOW", app.close)
     root.mainloop()
