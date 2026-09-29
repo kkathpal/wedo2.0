@@ -44,6 +44,18 @@ TEST_PATTERNS = {"fwd": (1, 1), "back": (-1, -1), "left": (-1, 1), "right": (1, 
 ARROWS = [("fwd", "▲"), ("back", "▼"), ("left", "◀"), ("right", "▶")]
 MOTIONS = [("fwd", "Forward"), ("back", "Backward"), ("left", "Left"), ("right", "Right")]
 
+# WeDo motors stall below about this much power, so a wheel that should move
+# always gets at least this. Raise it if a wheel still sits still on turns.
+MIN_POWER = 35
+ARC_INSIDE = 0.5   # inside wheel speed while curving (0.5 = half of the outside wheel)
+
+
+def motor_power(power):
+    """Round to an int and lift any non-zero power up to MIN_POWER."""
+    if not power:
+        return 0
+    return int(max(abs(power), MIN_POWER)) * (1 if power > 0 else -1)
+
 
 def valid_calibration(forward, right):
     """Forward and spin-right must drive the two motors in different combinations."""
@@ -129,7 +141,7 @@ class RCCarApp:
             speed_text.configure(text=f"{value}%")
             self._update_drive()
 
-        tk.Scale(speed_row, from_=20, to=100, orient="horizontal", variable=self.speed,
+        tk.Scale(speed_row, from_=MIN_POWER, to=100, orient="horizontal", variable=self.speed,
                  showvalue=False, length=240, width=14, sliderlength=22, bg=ACCENT,
                  troughcolor=PANEL, highlightthickness=0, activebackground=ACCENT,
                  sliderrelief="flat", bd=0, takefocus=0, command=on_speed
@@ -273,13 +285,16 @@ class RCCarApp:
         s = self.speed.get()
 
         if forward:
-            # Drive in an arc: slow down the wheel on the inside of the turn
-            left = s * forward * (0.3 if turn < 0 else 1)
-            right = s * forward * (0.3 if turn > 0 else 1)
+            # Drive in an arc: slow down the wheel on the inside of the turn,
+            # keeping the outside wheel fast enough that the inside one doesn't stall
+            if turn:
+                s = max(s, MIN_POWER / ARC_INSIDE)
+            left = s * forward * (ARC_INSIDE if turn < 0 else 1)
+            right = s * forward * (ARC_INSIDE if turn > 0 else 1)
         else:
-            # Spin in place
-            left, right = s * turn * 0.7, -s * turn * 0.7
-        left, right = int(left), int(right)
+            # Spin in place at full speed: skidding the tyres sideways takes extra power
+            left, right = s * turn, -s * turn
+        left, right = motor_power(left), motor_power(right)
 
         self._draw_meter(self.meter_left, left)
         self._draw_meter(self.meter_right, right)
@@ -470,9 +485,9 @@ class CalibrationWindow:
         """Run the held arrow's raw pattern (only one at a time, so the result is clear)."""
         if len(self.held) == 1:
             key = next(iter(self.held))
-            power = self.app.speed.get() * (1 if key in ("fwd", "back") else 0.7)
+            power = self.app.speed.get()
             a, b = TEST_PATTERNS[key]
-            self.app.target = (int(a * power), int(b * power))
+            self.app.target = (motor_power(a * power), motor_power(b * power))
         else:
             self.app.target = (0, 0)
         for key, label in self.arrows.items():
