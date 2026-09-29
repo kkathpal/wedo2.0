@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#1b1c21">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="WeDo RC">
+<title>WeDo RC</title>
+<style>
+  :root {
+    --bg: #1b1c21; --panel: #2a2c34; --hover: #353843; --line: #3a3d48;
+    --fg: #ececef; --muted: #8f929c; --accent: #f5c518; --good: #4cc96b; --bad: #ef5350;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 14px/1.3 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-variant-numeric: tabular-nums; -webkit-user-select: none; user-select: none;
+    touch-action: manipulation; overscroll-behavior: none; }
+  body { padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom); display: flex;
+    flex-direction: column; min-height: 100%; }
+
+  header { display: flex; align-items: center; gap: 8px; padding: 12px 0 10px; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 700; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+  .status { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; flex: 1; min-width: 0; text-align: right; }
+
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; flex: 1; align-content: start; }
+  @media (orientation: landscape) and (min-width: 600px) {
+    .layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  }
+  .card { background: var(--panel); border-radius: 14px; padding: 12px; min-width: 0; }
+  .caps { font-size: 10px; font-weight: 700; letter-spacing: .06em; color: var(--muted); text-transform: uppercase; }
+
+  .meters { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .meter .bar { position: relative; height: 12px; background: var(--bg); border-radius: 6px; overflow: hidden; margin: 6px 0 4px; }
+  .meter .bar::after { content: ""; position: absolute; top: -2px; bottom: -2px; left: 50%; width: 1px; background: var(--muted); }
+  .meter .fill { position: absolute; top: 0; bottom: 0; left: 50%; right: 50%; background: var(--accent); transition: all .12s ease-out; }
+  .meter em { font-style: normal; font-size: 12px; }
+
+  .pad { display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(3, 1fr);
+    gap: 10px; width: min(100%, 330px, 42vh); aspect-ratio: 1; margin: 0 auto; touch-action: none; }
+  .key { display: grid; place-items: center; border-radius: 18px; background: var(--hover);
+    border: 1px solid var(--line); touch-action: none; transition: background .06s, transform .06s; }
+  .key svg { width: 38%; fill: var(--fg); }
+  .key.on { background: var(--accent); border-color: #ffe27a; transform: scale(.96); }
+  .key.on svg { fill: #111; }
+  .k-fwd { grid-area: 1 / 2 } .k-left { grid-area: 2 / 1 } .k-right { grid-area: 2 / 3 } .k-back { grid-area: 3 / 2 }
+  button { font: inherit; color: var(--fg); border: 0; }
+  .stop { grid-area: 2 / 2; border-radius: 50%; background: var(--bad); color: #fff; font-weight: 900;
+    letter-spacing: .04em; box-shadow: 0 0 0 6px #ef535033; touch-action: none; }
+  .stop:active { transform: scale(.94); }
+  .horn { grid-area: 3 / 3; align-self: center; justify-self: center; width: 78%; aspect-ratio: 1;
+    border-radius: 50%; background: var(--bg); color: var(--accent); font-size: 11px; font-weight: 800;
+    letter-spacing: .04em; border: 1px solid var(--line); touch-action: none; }
+  .horn:active { background: var(--accent); color: #111; transform: scale(.94); }
+
+  .row { display: flex; align-items: center; gap: 12px; }
+  .row + .row { margin-top: 14px; }
+  .row .caps { width: 46px; flex: none; }
+  input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 28px; }
+  .speedval { width: 42px; text-align: right; flex: none; font-weight: 600; }
+  .lights { display: flex; flex-wrap: wrap; gap: 8px; flex: 1; }
+  .swatch { width: 30px; height: 30px; border-radius: 50%; border: 2px solid var(--line); padding: 0; }
+  .swatch:active { transform: scale(.9); }
+
+  .warn { color: var(--accent); font-size: 12px; }
+  .warn:empty { display: none; }
+  footer { color: var(--muted); font-size: 11px; text-align: center; padding: 12px 0 14px; }
+
+  .overlay { position: fixed; inset: 0; background: #1b1c21ee; display: none; place-items: center;
+    text-align: center; padding: 24px; z-index: 10; }
+  .overlay.show { display: grid; }
+  .overlay h2 { margin: 0 0 6px; font-size: 18px; }
+  .overlay p { margin: 0; color: var(--muted); max-width: 320px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>WeDo RC</h1>
+  <span class="status" id="status">connecting…</span>
+</header>
+
+<div class="layout">
+  <section class="card">
+    <div class="pad" id="pad">
+      <div class="key k-fwd" data-dir="fwd"><svg viewBox="0 0 24 24"><path d="M12 4 21 18H3z"/></svg></div>
+      <div class="key k-left" data-dir="left"><svg viewBox="0 0 24 24"><path d="M4 12 18 3v18z"/></svg></div>
+      <button class="stop" id="stop">STOP</button>
+      <div class="key k-right" data-dir="right"><svg viewBox="0 0 24 24"><path d="M20 12 6 21V3z"/></svg></div>
+      <div class="key k-back" data-dir="back"><svg viewBox="0 0 24 24"><path d="M12 20 3 6h18z"/></svg></div>
+      <button class="horn" id="horn">HORN</button>
+    </div>
+  </section>
+
+  <section style="display:grid; gap:12px; align-content:start">
+    <div class="card meters">
+      <div class="meter"><span class="caps">Left</span><div class="bar"><div class="fill" id="barL"></div></div><em id="valL">0</em></div>
+      <div class="meter"><span class="caps">Right</span><div class="bar"><div class="fill" id="barR"></div></div><em id="valR">0</em></div>
+    </div>
+    <div class="card">
+      <div class="row">
+        <span class="caps">Speed</span>
+        <input type="range" id="speed" min="35" max="100" value="70">
+        <span class="speedval" id="speedval">70%</span>
+      </div>
+      <div class="row">
+        <span class="caps">Lights</span>
+        <div class="lights" id="lights"></div>
+      </div>
+    </div>
+    <div class="warn" id="warn"></div>
+  </section>
+</div>
+
+<footer>Hold arrows to drive · two fingers to curve</footer>
+
+<div class="overlay" id="overlay"><div><h2 id="ovTitle">Connecting…</h2><p id="ovText">Looking for the controller on your PC.</p></div></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const held = new Set();            // directions currently pressed
+const pointers = new Map();        // pointerId -> direction
+const keys = new Set();            // keyboard directions (testing in a desktop browser)
+let speed = 70, gotSpeed = false, builtLights = false;
+let inFlight = false, lastState = 0, failures = 0;
+
+// ---------- input: multi-touch hold-to-drive ----------
+function paintKeys() { document.querySelectorAll(".key").forEach(k => k.classList.toggle("on", held.has(k.dataset.dir))); }
+function recompute() {
+  const before = [...held].sort().join();
+  held.clear(); pointers.forEach(d => held.add(d)); keys.forEach(d => held.add(d));
+  paintKeys();
+  if ([...held].sort().join() !== before) send(true);   // react instantly, don't wait for the tick
+}
+document.querySelectorAll(".key").forEach(k => {
+  k.addEventListener("pointerdown", e => { e.preventDefault(); k.setPointerCapture(e.pointerId); pointers.set(e.pointerId, k.dataset.dir); recompute(); });
+  const up = e => { pointers.delete(e.pointerId); recompute(); };
+  ["pointerup", "pointercancel", "lostpointercapture"].forEach(t => k.addEventListener(t, up));
+});
+function releaseAll() { pointers.clear(); keys.clear(); recompute(); post("/stop", {}); }
+$("stop").addEventListener("pointerdown", e => { e.preventDefault(); releaseAll(); });
+$("horn").addEventListener("pointerdown", e => { e.preventDefault(); post("/horn", {}); });
+document.addEventListener("contextmenu", e => e.preventDefault());
+document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAll(); });
+window.addEventListener("blur", releaseAll);
+
+const KEYMAP = { ArrowUp: "fwd", w: "fwd", ArrowDown: "back", s: "back", ArrowLeft: "left", a: "left", ArrowRight: "right", d: "right" };
+addEventListener("keydown", e => {
+  if (KEYMAP[e.key]) { e.preventDefault(); keys.add(KEYMAP[e.key]); recompute(); }
+  else if (e.key === " ") releaseAll();
+  else if (e.key === "h" && !e.repeat) post("/horn", {});
+});
+addEventListener("keyup", e => { if (KEYMAP[e.key]) { keys.delete(KEYMAP[e.key]); recompute(); } });
+
+$("speed").addEventListener("input", e => {
+  speed = +e.target.value; $("speedval").textContent = speed + "%";
+  send(true);   // apply now, even mid-drive
+});
+
+// ---------- talking to the PC ----------
+async function post(path, body) {
+  try {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    failures = 0;
+    show(await r.json());
+  } catch (e) { fail(); }
+}
+async function send(force) {
+  if (inFlight && !force) return;
+  inFlight = true;
+  await post("/drive", { held: [...held], speed });
+  inFlight = false;
+}
+async function poll() {
+  try {
+    const r = await fetch("/state", { cache: "no-store" });
+    failures = 0;
+    show(await r.json());
+  } catch (e) { fail(); }
+}
+setInterval(() => {
+  if (held.size) send(false);                       // heartbeat: keeps the car moving while held
+  else if (performance.now() - lastState > 300) { lastState = performance.now(); poll(); }
+}, 100);
+
+function fail() {
+  if (++failures >= 3) {
+    $("overlay").classList.add("show");
+    $("ovTitle").textContent = "Can't reach the PC";
+    $("ovText").textContent = "Is rc_car_phone.py still running, and is this phone on the same Wi-Fi?";
+    $("dot").style.background = "var(--bad)";
+  }
+}
+
+function show(s) {
+  if (!gotSpeed && s.speed) {   // start from the PC's speed (another phone may have set it)
+    gotSpeed = true; speed = s.speed;
+    $("speed").min = s.min_speed; $("speed").value = speed; $("speedval").textContent = speed + "%";
+  }
+  if (!builtLights && s.lights) {
+    builtLights = true;
+    for (const l of s.lights) {
+      const b = document.createElement("button");
+      b.className = "swatch"; b.style.background = l.color; b.title = l.name; b.ariaLabel = l.name + " light";
+      b.addEventListener("click", () => post("/light", { name: l.name }));
+      $("lights").appendChild(b);
+    }
+  }
+  const ok = s.connected;
+  $("overlay").classList.toggle("show", !ok);
+  if (!ok) { $("ovTitle").textContent = "Waiting for the hub"; $("ovText").textContent = s.status || "Press the green button on the hub."; }
+  $("dot").style.background = ok ? "var(--good)" : "var(--accent)";
+  $("status").textContent = ok ? (s.calibrated ? "Connected · calibrated" : "Connected") : "";
+  meter("L", s.left || 0); meter("R", s.right || 0);
+  $("warn").textContent = s.warning || "";
+}
+function meter(side, v) {
+  const f = Math.max(-1, Math.min(1, v / 100)), el = $("bar" + side);
+  el.style.left = f >= 0 ? "50%" : (50 + f * 50) + "%";
+  el.style.right = f >= 0 ? (50 - f * 50) + "%" : "50%";
+  el.style.background = f >= 0 ? "var(--accent)" : "var(--bad)";
+  $("val" + side).textContent = v > 0 ? "+" + v : v;
+}
+
+poll();
+</script>
+</body>
+</html>

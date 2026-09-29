@@ -1,7 +1,7 @@
 __pycache__/
 *.pyc
 
-# Per-car settings written by rc_car.py
+# Per-car settings written by rc_car.pyw
 rc_car_calibration.json
 
 # Secrets / local environment

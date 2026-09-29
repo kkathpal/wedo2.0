@@ -5,16 +5,27 @@ Calibrate to tell the program which way your car actually moves; the
 answer is saved to rc_car_calibration.json next to this file.
 
 Keys: W/A/S/D or arrow keys to drive, Space = horn, Esc = stop.
+
+Run:   double-click rc_car.pyw (no console window), or
+       python rc_car.pyw   to see error messages in a terminal
 """
 
 import asyncio
 import json
 import queue
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
+from tkinter import messagebox
 
-from wedo2 import MOTOR, WeDoHub
+try:
+    from wedo2 import MOTOR, WeDoHub
+except ImportError as e:   # a double-clicked .pyw has no console, so say it in a window
+    tk.Tk().withdraw()
+    messagebox.showerror("WeDo RC Car", f"{e}\n\nInstall what's missing once with:\n"
+                                        "    python -m pip install bleak")
+    sys.exit(1)
 
 BG = "#1b1c21"
 PANEL = "#2a2c34"
@@ -55,6 +66,31 @@ def motor_power(power):
     if not power:
         return 0
     return int(max(abs(power), MIN_POWER)) * (1 if power > 0 else -1)
+
+
+def wheel_powers(pressed, speed):
+    """(left, right) wheel power, + = forward, for the held directions ("fwd", "back",
+    "left", "right"). Shared with rc_car_phone.py so the phone drives the same way."""
+    forward = ("fwd" in pressed) - ("back" in pressed)
+    turn = ("right" in pressed) - ("left" in pressed)
+    if forward:
+        # Drive in an arc: slow down the wheel on the inside of the turn,
+        # keeping the outside wheel fast enough that the inside one doesn't stall
+        if turn:
+            speed = max(speed, MIN_POWER / ARC_INSIDE)
+        left = speed * forward * (ARC_INSIDE if turn < 0 else 1)
+        right = speed * forward * (ARC_INSIDE if turn > 0 else 1)
+    else:
+        # Spin in place at full speed: skidding the tyres sideways takes extra power
+        left, right = speed * turn, -speed * turn
+    return motor_power(left), motor_power(right)
+
+
+def port_powers(left, right, cal):
+    """(port 1, port 2) power: each port gets its wheel's power, flipped if that motor
+    runs reversed (see valid_calibration)."""
+    forward_signs, right_signs = cal
+    return tuple(f * (left if f == r else right) for f, r in zip(forward_signs, right_signs))
 
 
 def valid_calibration(forward, right):
@@ -280,31 +316,12 @@ class RCCarApp:
         if self.cal_win:
             return   # the calibration window is driving the motors
         p = self.pressed
-        forward = ("fwd" in p) - ("back" in p)
-        turn = ("right" in p) - ("left" in p)
-        s = self.speed.get()
-
-        if forward:
-            # Drive in an arc: slow down the wheel on the inside of the turn,
-            # keeping the outside wheel fast enough that the inside one doesn't stall
-            if turn:
-                s = max(s, MIN_POWER / ARC_INSIDE)
-            left = s * forward * (ARC_INSIDE if turn < 0 else 1)
-            right = s * forward * (ARC_INSIDE if turn > 0 else 1)
-        else:
-            # Spin in place at full speed: skidding the tyres sideways takes extra power
-            left, right = s * turn, -s * turn
-        left, right = motor_power(left), motor_power(right)
-
+        left, right = wheel_powers(p, self.speed.get())
         self._draw_meter(self.meter_left, left)
         self._draw_meter(self.meter_right, right)
         for d, b in self.pad.items():
             b.configure(bg=ACCENT if d in p else PANEL, fg="#111" if d in p else FG)
-
-        # Send each port its wheel's power, flipped if that motor runs reversed
-        forward_signs, right_signs = self.cal
-        self.target = tuple(f * (left if f == r else right)
-                            for f, r in zip(forward_signs, right_signs))
+        self.target = port_powers(left, right, self.cal)
 
     # ---------------- hub actions (run on the Bluetooth thread) ----------------
 
