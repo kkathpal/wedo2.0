@@ -4,8 +4,9 @@ This PC keeps the Bluetooth connection to the hub and serves a touch controller 
 to phones on the same Wi-Fi. It drives exactly like rc_car.pyw: same turning, and the
 same calibration (rc_car_calibration.json, made with Setup → Calibrate in rc_car.pyw).
 
-Run:   python rc_car_phone.py
-Then press the green button on the hub, and open the printed http://<this PC>:8081
+Run:   python rc_car_phone.py               (uses a random free port from 8000-8999)
+       python rc_car_phone.py --port 8090   (use this port)
+Then press the green button on the hub, and open the printed http://<this PC>:<port>
 address on your phone. (Close rc_car.pyw first: the hub takes one connection at a time.)
 
 Safety: the phone re-sends the held buttons every ~100 ms, and this server stops the
@@ -15,6 +16,7 @@ phone or losing Wi-Fi stops the car.
 import asyncio
 import json
 import os
+import random
 import socket
 import sys
 import threading
@@ -28,7 +30,7 @@ _loader = SourceFileLoader("rc_car", os.path.join(HERE, "rc_car.pyw"))
 rc = module_from_spec(spec_from_loader("rc_car", _loader))
 _loader.exec_module(rc)
 
-PORT = 8081              # 8080 is the EV3 phone controller, so both can run
+PORT_RANGE = (8000, 8999)   # each run uses a random free port from here (--port N picks one)
 PAGE = os.path.join(HERE, "rc_car_phone.html")
 PHONE_TIMEOUT = 0.35     # stop if the phone sends nothing for this long while driving (s)
 DEFAULT_SPEED = 70
@@ -164,6 +166,9 @@ controller = Controller()
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+    # On Windows, address reuse lets a second copy take a port that's already in use
+    # (and phones then reach either one), so there a busy port must fail instead.
+    allow_reuse_address = sys.platform != "win32"
 
     def handle_error(self, request, client_address):
         # A phone closing the tab or switching apps mid-request is normal; don't print tracebacks.
@@ -236,16 +241,44 @@ def lan_addresses():
     return found
 
 
+def port_from_args():
+    """The number after --port on the command line, or None."""
+    args = sys.argv[1:]
+    if "--port" in args:
+        i = args.index("--port")
+        if i + 1 < len(args) and args[i + 1].isdigit():
+            return int(args[i + 1])
+        sys.exit("Use:  python rc_car_phone.py --port 8090")
+    return None
+
+
+def start_server(wanted=None):
+    """The web server on the `wanted` port, or on a random free port in PORT_RANGE.
+    Trying to open the server is the check, so no other program can take the port
+    between checking and using it."""
+    if wanted:
+        try:
+            return Server(("0.0.0.0", wanted), Handler)
+        except OSError as e:
+            sys.exit(f"Can't use port {wanted} ({e.strerror or e}).\n"
+                     f"Something else is using it: pick another, or leave out --port for a random free one.")
+    ports = list(range(PORT_RANGE[0], PORT_RANGE[1] + 1))
+    random.shuffle(ports)
+    for port in ports:
+        try:
+            return Server(("0.0.0.0", port), Handler)
+        except OSError:
+            continue   # in use: try another
+    sys.exit(f"No free port between {PORT_RANGE[0]} and {PORT_RANGE[1]}.")
+
+
 def main():
-    try:
-        server = Server(("0.0.0.0", PORT), Handler)
-    except OSError as e:
-        sys.exit(f"Can't use port {PORT} ({e}).\n"
-                 f"Is rc_car_phone.py already running? Close it, or change PORT at the top of rc_car_phone.py.")
+    server = start_server(port_from_args())
+    port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    print("WeDo RC phone controller")
+    print("\nWeDo RC phone controller")
     for ip in lan_addresses():
-        print(f"  open on your phone:  http://{ip}:{PORT}")
+        print(f"  open on your phone:  http://{ip}:{port}")
     print("  (phone must be on the same Wi-Fi; allow Python through the firewall if asked)")
     print("  Press the green button on the hub to connect.  Ctrl+C to quit.")
     try:
